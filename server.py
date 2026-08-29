@@ -19,32 +19,6 @@ from starlette.routing import Mount
 
 load_dotenv()
 
-# Caching for read-only operations to minimize token usage
-CACHE_DIR = ".onshape_cache"
-CACHE_TTL = 3600  # 1 hour in seconds
-
-def get_cached(cache_key, fetch_fn, ttl=CACHE_TTL):
-    """Return cached result if fresh, else call fetch_fn() and cache the result."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    cache_file = os.path.join(CACHE_DIR, f"{cache_key}.json")
-    
-    if os.path.exists(cache_file):
-        mtime = os.path.getmtime(cache_file)
-        if (datetime.now().timestamp() - mtime) < ttl:
-            try:
-                with open(cache_file) as f:
-                    return json.load(f)
-            except Exception:
-                pass  # Fall through and re-fetch if cache read fails
-    
-    result = fetch_fn()
-    try:
-        with open(cache_file, 'w') as f:
-            json.dump(result, f)
-    except Exception:
-        pass  # If cache write fails, just return result anyway
-    return result
-
 ACTIVE_DOCUMENT = {"did": None, "wid": None, "eid": None, "namespace": None}
 ACCESS_KEY = os.getenv("ONSHAPE_ACCESS_KEY")
 SECRET_KEY = os.getenv("ONSHAPE_SECRET_KEY")
@@ -88,13 +62,10 @@ def make_auth_header(method, path, query="", content_type="application/json"):
     }
 
 
-def onshape_request(method, path, query="", body=None, extract_fields=None):
+def onshape_request(method, path, query="", body=None):
     """
     Central request function. In DRY_RUN mode, prints what WOULD be sent
     and returns a fake response instead of hitting the API.
-    
-    extract_fields: optional list of keys to extract from response (for lists and dicts)
-                    reduces token cost by filtering out unnecessary data.
     """
     if DRY_RUN:
         preview = {
@@ -119,19 +90,7 @@ def onshape_request(method, path, query="", body=None, extract_fields=None):
     if not resp.ok:
         print("ERROR RESPONSE BODY:", resp.text)
     resp.raise_for_status()
-    data = resp.json()
-    
-    # Filter response if extract_fields specified
-    if extract_fields:
-        if isinstance(data, list):
-            return [
-                {k: item.get(k) for k in extract_fields if k in item}
-                for item in data
-            ]
-        elif isinstance(data, dict):
-            return {k: data.get(k) for k in extract_fields if k in data}
-    
-    return data
+    return resp.json()
 
 
 def resolve_document_ids(did, wid, eid, namespace=None):
@@ -166,181 +125,69 @@ def find_feature_studio_namespace(elements):
     return None
 
 
+def quantity_param(param_id, cm_value):
+    return {
+        "type": 147,
+        "typeName": "BTMParameterQuantity",
+        "message": {
+            "units": "",
+            "value": 0.0,
+            "expression": f"{cm_value} cm",
+            "isInteger": False,
+            "parameterId": param_id,
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+
+def boolean_param(param_id, value):
+    return {
+        "type": 144,
+        "typeName": "BTMParameterBoolean",
+        "message": {
+            "value": bool(value),
+            "parameterId": param_id,
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+
 @mcp.tool()
 def list_documents() -> dict:
-    """List recent OnShape documents (name and ID only, cached 1 hour)."""
-    def fetch():
-        return onshape_request(
-            "GET", "/api/documents",
-            query="ownerType=0&limit=20",
-            extract_fields=["name", "id", "href"]
-        )
-    return get_cached("list_documents", fetch)
-
-
-@mcp.tool()
-def document_info(did: str, wid: str, eid: str) -> dict:
-    """Get document summary + feature list in one call (batched for efficiency). Returns document ID, name, and feature summary with types and count. Useful when you need an overview of what's in a document."""
-    def fetch():
-        # Get document elements to find part studio name
-        path = f"/api/documents/d/{did}/w/{wid}/elements"
-        elements = onshape_request("GET", path, extract_fields=["id", "name", "elementType"])
-        
-        part_studio_name = None
-        for elem in elements:
-            if elem.get("elementType") == "PARTSTUDIO":
-                part_studio_name = elem.get("name")
-                break
-        
-        # Get features summary
-        features_path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
-        features = onshape_request(
-            "GET", features_path,
-            extract_fields=["featureId", "name", "featureType"]
-        )
-        
-        # Summarize features
-        feature_types = {}
-        feature_count = 0
-        if isinstance(features, list):
-            feature_count = len(features)
-            for f in features:
-                ftype = f.get("featureType", "unknown")
-                feature_types[ftype] = feature_types.get(ftype, 0) + 1
-        
-        return {
-            "documentId": did,
-            "partStudioName": part_studio_name,
-            "partStudioId": eid,
-            "featureSummary": {
-                "count": feature_count,
-                "types": feature_types
-            }
-        }
-    
-    cache_key = f"document_info_{did}_{wid}_{eid}"
-    return get_cached(cache_key, fetch)
+    """List OnShape documents owned by the user."""
+    return onshape_request("GET", "/api/documents", query="ownerType=0")
 
 
 @mcp.tool()
 def run_featurescript(did: str, wid: str, eid: str, script: str) -> dict:
-    """Evaluate a FeatureScript expression and return its result. This is READ-ONLY — it does NOT create or persist any geometry in the document. Use create_box, create_cylinder, create_sketch_extrude, or boolean_subtract to actually add shapes. Useful for querying plane IDs, evaluating expressions, or inspecting geometry state."""
+    """Evaluate a FeatureScript expression and return its result. This is READ-ONLY — it does NOT create or persist any geometry in the document. Use create_cylinder, create_sketch_extrude, or boolean_subtract to actually add shapes. Useful for querying plane IDs, evaluating expressions, or inspecting geometry state."""
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/featurescript"
     return onshape_request("POST", path, body={"script": script})
 
 
 @mcp.tool()
 def get_features(did: str, wid: str, eid: str) -> dict:
-    """Get feature list summary (cached 1 hour). Returns feature count, types, and names only."""
-    def fetch():
-        path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
-        features = onshape_request(
-            "GET", path,
-            extract_fields=["featureId", "name", "featureType"]
-        )
-        # Return compact summary to save tokens
-        if isinstance(features, list):
-            types = {}
-            names = []
-            for f in features:
-                ftype = f.get("featureType", "unknown")
-                types[ftype] = types.get(ftype, 0) + 1
-                names.append(f.get("name"))
-            return {
-                "count": len(features),
-                "types": types,
-                "names": names
-            }
-        return features
-    
-    cache_key = f"features_{did}_{wid}_{eid}"
-    return get_cached(cache_key, fetch)
-
-
-@mcp.tool()
-def create_box(width_cm: float, depth_cm: float, height_cm: float,
-                did: str = None, wid: str = None, eid: str = None, namespace: str = None,
-                x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
-                name: str = "Box (from API)") -> dict:
-    """Create a box using the custom boxFeature, at position x, y, z. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
-    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
-    if not (did and wid and eid and namespace):
-        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
-
+    """Get the current feature list for a part studio."""
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
-
-    def quantity_param(param_id, cm_value):
-        return {
-            "type": 147,
-            "typeName": "BTMParameterQuantity",
-            "message": {
-                "units": "",
-                "value": 0.0,
-                "expression": f"{cm_value} cm",
-                "isInteger": False,
-                "parameterId": param_id,
-                "libraryRelationType": "DEFAULT",
-                "parameterName": "",
-                "hasUserCode": False
-            }
-        }
-
-    body = {
-        "feature": {
-            "type": 134,
-            "typeName": "BTMFeature",
-            "message": {
-                "featureType": "boxFeature",
-                "name": name,
-                "namespace": namespace,
-                "suppressed": False,
-                "parameters": [
-                    quantity_param("width", width_cm),
-                    quantity_param("depth", depth_cm),
-                    quantity_param("height", height_cm),
-                    quantity_param("x", x_cm),
-                    quantity_param("y", y_cm),
-                    quantity_param("z", z_cm)
-                ],
-                "subFeatures": [],
-                "returnAfterSubfeatures": False,
-                "suppressionState": {"type": 0},
-                "parameterLibraries": [],
-                "hasUserCode": False
-            }
-        }
-    }
-
-    return onshape_request("POST", path, body=body)
+    return onshape_request("GET", path)
 
 
 @mcp.tool()
 def create_sketch_extrude(points: list, depth_cm: float,
                            did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                            plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
+                           merge: bool = True,
                            name: str = "Sketch Extrude (from API)") -> dict:
-    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]] — the polygon closes automatically. plane is one of FRONT, TOP, RIGHT. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
+    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]] — the polygon closes automatically. plane is one of FRONT, TOP, RIGHT. merge (default True) merges this shape into any existing touching/overlapping solid so the part studio ends up with one combined part rather than a separate part per shape — set merge=False if you specifically want a standalone body. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
     did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
     if not (did and wid and eid and namespace):
         return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
 
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
-
-    def quantity_param(param_id, cm_value):
-        return {
-            "type": 147,
-            "typeName": "BTMParameterQuantity",
-            "message": {
-                "units": "",
-                "value": 0.0,
-                "expression": f"{cm_value} cm",
-                "isInteger": False,
-                "parameterId": param_id,
-                "libraryRelationType": "DEFAULT",
-                "parameterName": "",
-                "hasUserCode": False
-            }
-        }
 
     def point_item(px_cm, py_cm):
         return {
@@ -396,7 +243,8 @@ def create_sketch_extrude(points: list, depth_cm: float,
                     quantity_param("depth", depth_cm),
                     quantity_param("x", x_cm),
                     quantity_param("y", y_cm),
-                    quantity_param("z", z_cm)
+                    quantity_param("z", z_cm),
+                    boolean_param("merge", merge)
                 ],
                 "subFeatures": [],
                 "returnAfterSubfeatures": False,
@@ -414,29 +262,14 @@ def create_sketch_extrude(points: list, depth_cm: float,
 def create_cylinder(radius_cm: float, depth_cm: float,
                      did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                      plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
+                     merge: bool = True,
                      name: str = "Cylinder (from API)") -> dict:
-    """Create a cylinder. plane is one of FRONT, TOP, RIGHT. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
+    """Create a cylinder. plane is one of FRONT, TOP, RIGHT. merge (default True) merges this shape into any existing touching/overlapping solid so the part studio ends up with one combined part rather than a separate part per shape — set merge=False if you specifically want a standalone body. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
     did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
     if not (did and wid and eid and namespace):
         return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
 
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
-
-    def quantity_param(param_id, cm_value):
-        return {
-            "type": 147,
-            "typeName": "BTMParameterQuantity",
-            "message": {
-                "units": "",
-                "value": 0.0,
-                "expression": f"{cm_value} cm",
-                "isInteger": False,
-                "parameterId": param_id,
-                "libraryRelationType": "DEFAULT",
-                "parameterName": "",
-                "hasUserCode": False
-            }
-        }
 
     plane_param = {
         "type": 145,
@@ -467,7 +300,8 @@ def create_cylinder(radius_cm: float, depth_cm: float,
                     quantity_param("depth", depth_cm),
                     quantity_param("x", x_cm),
                     quantity_param("y", y_cm),
-                    quantity_param("z", z_cm)
+                    quantity_param("z", z_cm),
+                    boolean_param("merge", merge)
                 ],
                 "subFeatures": [],
                 "returnAfterSubfeatures": False,
@@ -485,7 +319,7 @@ def create_cylinder(radius_cm: float, depth_cm: float,
 def boolean_subtract(target_feature_id: str, tool_feature_id: str,
                       did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                       name: str = "Boolean Subtract (from API)") -> dict:
-    """Subtract the tool shape from the target shape, removing tool_feature_id's geometry from target_feature_id's geometry (e.g. cutting a hole). Both feature IDs must come from the featureId returned by an earlier create_box, create_cylinder, or create_sketch_extrude call in the SAME document/workspace. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio."""
+    """Subtract the tool shape from the target shape, removing tool_feature_id's geometry from target_feature_id's geometry (e.g. cutting a hole). Both feature IDs must come from the featureId returned by an earlier create_cylinder or create_sketch_extrude call in the SAME document/workspace. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio."""
     did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
     if not (did and wid and eid and namespace):
         return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
@@ -532,7 +366,7 @@ def boolean_subtract(target_feature_id: str, tool_feature_id: str,
 
 @mcp.tool()
 def copy_document(new_name: str) -> dict:
-    """Create a new OnShape document by copying the template document, which already has box, cylinder, sketch-extrude, and boolean-subtract custom features defined. Use this when the user wants to start a new project or design, rather than working in an existing document. Returns newDocumentId and newWorkspaceId. IMPORTANT: after calling this, you must call get_default_part_studio with those two values — it automatically finds the eid AND the correct namespace for this new document's own copy of the custom features, and activates them so subsequent shape tools work without needing did/wid/eid/namespace passed every time."""
+    """Create a new OnShape document by copying the template document, which already has cylinder, sketch-extrude, and boolean-subtract custom features defined. Use this when the user wants to start a new project or design, rather than working in an existing document. Returns newDocumentId and newWorkspaceId. IMPORTANT: after calling this, you must call get_default_part_studio with those two values — it automatically finds the eid AND the correct namespace for this new document's own copy of the custom features, and activates them so subsequent shape tools work without needing did/wid/eid/namespace passed every time."""
     template_did = "e7a7295f056b7f47b58fb416"
     template_wid = "db250fad1eec3791e9940156"
 
@@ -547,76 +381,68 @@ def copy_document(new_name: str) -> dict:
 
 @mcp.tool()
 def get_default_part_studio(did: str, wid: str) -> dict:
-    """Find the eid (element ID) of the Part Studio in a document/workspace, AND the correct namespace for its custom features (box, cylinder, sketch-extrude, boolean-subtract). REQUIRED after copy_document, before calling any shape-creation tool on a newly created document — each document (including copies) has its own distinct Feature Studio element and namespace; a namespace from a different document will NOT work here. This automatically activates the result (same effect as calling set_active_document), so create_box/create_cylinder/create_sketch_extrude/boolean_subtract can be called right after this with no did/wid/eid/namespace arguments needed."""
-    def fetch():
-        path = f"/api/documents/d/{did}/w/{wid}/elements"
-        result = onshape_request("GET", path)
+    """Find the eid (element ID) of the Part Studio in a document/workspace, AND the correct namespace for its custom features (cylinder, sketch-extrude, boolean-subtract). REQUIRED after copy_document, before calling any shape-creation tool on a newly created document — each document (including copies) has its own distinct Feature Studio element and namespace; a namespace from a different document will NOT work here. This automatically activates the result (same effect as calling set_active_document), so create_cylinder/create_sketch_extrude/boolean_subtract can be called right after this with no did/wid/eid/namespace arguments needed."""
+    path = f"/api/documents/d/{did}/w/{wid}/elements"
+    result = onshape_request("GET", path)
 
-        if DRY_RUN:
-            return result
+    if DRY_RUN:
+        return result
 
-        eid = None
-        part_studio_name = None
-        for element in result:
-            if element.get("elementType") == "PARTSTUDIO":
-                eid = element.get("id")
-                part_studio_name = element.get("name")
-                break
+    eid = None
+    part_studio_name = None
+    for element in result:
+        if element.get("elementType") == "PARTSTUDIO":
+            eid = element.get("id")
+            part_studio_name = element.get("name")
+            break
 
-        if not eid:
-            return {"error": "No part studio found in this document/workspace."}
+    if not eid:
+        return {"error": "No part studio found in this document/workspace."}
 
-        namespace = find_feature_studio_namespace(result)
-        if not namespace:
-            return {
-                "eid": eid,
-                "name": part_studio_name,
-                "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools (create_box, etc.) will not work here until a Feature Studio with the custom features exists."
-            }
-
-        ACTIVE_DOCUMENT["did"] = did
-        ACTIVE_DOCUMENT["wid"] = wid
-        ACTIVE_DOCUMENT["eid"] = eid
-        ACTIVE_DOCUMENT["namespace"] = namespace
-
+    namespace = find_feature_studio_namespace(result)
+    if not namespace:
         return {
             "eid": eid,
             "name": part_studio_name,
-            "namespace": namespace,
-            "active_document": dict(ACTIVE_DOCUMENT)
+            "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools (create_cylinder, etc.) will not work here until a Feature Studio with the custom features exists."
         }
-    
-    cache_key = f"default_part_studio_{did}_{wid}"
-    return get_cached(cache_key, fetch)
+
+    ACTIVE_DOCUMENT["did"] = did
+    ACTIVE_DOCUMENT["wid"] = wid
+    ACTIVE_DOCUMENT["eid"] = eid
+    ACTIVE_DOCUMENT["namespace"] = namespace
+
+    return {
+        "eid": eid,
+        "name": part_studio_name,
+        "namespace": namespace,
+        "active_document": dict(ACTIVE_DOCUMENT)
+    }
 
 
 @mcp.tool()
 def set_active_document(did: str, wid: str, eid: str) -> dict:
-    """Set the current working document/workspace/part studio, so subsequent create_box, create_cylinder, create_sketch_extrude, and boolean_subtract calls don't need did/wid/eid/namespace passed explicitly. Automatically looks up the correct, current namespace for this document's Feature Studio (freshly, so it stays correct even if the Feature Studio has been edited since last time). Use this to switch back to an existing document like the sandbox, or as a manual alternative to get_default_part_studio."""
-    def fetch():
-        path = f"/api/documents/d/{did}/w/{wid}/elements"
-        result = onshape_request("GET", path)
+    """Set the current working document/workspace/part studio, so subsequent create_cylinder, create_sketch_extrude, and boolean_subtract calls don't need did/wid/eid/namespace passed explicitly. Automatically looks up the correct, current namespace for this document's Feature Studio (freshly, so it stays correct even if the Feature Studio has been edited since last time). Use this to switch back to an existing document like the sandbox, or as a manual alternative to get_default_part_studio."""
+    path = f"/api/documents/d/{did}/w/{wid}/elements"
+    result = onshape_request("GET", path)
 
-        if DRY_RUN:
-            return result
+    if DRY_RUN:
+        return result
 
-        namespace = find_feature_studio_namespace(result)
+    namespace = find_feature_studio_namespace(result)
 
-        ACTIVE_DOCUMENT["did"] = did
-        ACTIVE_DOCUMENT["wid"] = wid
-        ACTIVE_DOCUMENT["eid"] = eid
-        ACTIVE_DOCUMENT["namespace"] = namespace
+    ACTIVE_DOCUMENT["did"] = did
+    ACTIVE_DOCUMENT["wid"] = wid
+    ACTIVE_DOCUMENT["eid"] = eid
+    ACTIVE_DOCUMENT["namespace"] = namespace
 
-        if not namespace:
-            return {
-                "active_document": dict(ACTIVE_DOCUMENT),
-                "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools will not work here."
-            }
+    if not namespace:
+        return {
+            "active_document": dict(ACTIVE_DOCUMENT),
+            "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools will not work here."
+        }
 
-        return {"active_document": dict(ACTIVE_DOCUMENT)}
-    
-    cache_key = f"active_document_{did}_{wid}_{eid}"
-    return get_cached(cache_key, fetch)
+    return {"active_document": dict(ACTIVE_DOCUMENT)}
 
 
 @mcp.tool()
