@@ -446,15 +446,17 @@ def get_active_document() -> dict:
 
 class ConnectorAuthMiddleware(BaseHTTPMiddleware):
     """
-    Rejects any request that doesn't carry the correct X-Connector-Secret header.
+    Rejects any request that doesn't carry the correct x-api-key header.
     Set the CONNECTOR_SECRET environment variable (in Render's dashboard) to enable
     this check. If CONNECTOR_SECRET is unset, the check is skipped entirely — this
     keeps local testing (no env var set) working without extra setup.
+    Uses x-api-key (rather than a custom header name) because claude.ai's custom
+    connector settings only allow a small set of pre-approved header names.
     """
     async def dispatch(self, request, call_next):
         secret = os.getenv("CONNECTOR_SECRET")
         if secret:
-            provided = request.headers.get("x-connector-secret")
+            provided = request.headers.get("x-api-key")
             if provided != secret:
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
         return await call_next(request)
