@@ -17,7 +17,7 @@ SECRET_KEY = os.getenv("ONSHAPE_SECRET_KEY")
 BASE_URL = "https://cad.onshape.com"
 
 # Set to False only when we're ready to actually hit the API
-DRY_RUN = True
+DRY_RUN = False
 
 mcp = MCPServer("onshape-connector")
 
