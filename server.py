@@ -253,6 +253,72 @@ def create_sketch_extrude(did: str, wid: str, eid: str, points: list, depth_cm: 
     return onshape_request("POST", path, body=body)
 
 
+@mcp.tool()
+def create_cylinder(did: str, wid: str, eid: str, radius_cm: float, depth_cm: float,
+                     plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
+                     name: str = "Cylinder (from API)") -> dict:
+    """Create a cylinder in the given part studio. plane is one of FRONT, TOP, RIGHT."""
+    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+
+    def quantity_param(param_id, cm_value):
+        return {
+            "type": 147,
+            "typeName": "BTMParameterQuantity",
+            "message": {
+                "units": "",
+                "value": 0.0,
+                "expression": f"{cm_value} cm",
+                "isInteger": False,
+                "parameterId": param_id,
+                "libraryRelationType": "DEFAULT",
+                "parameterName": "",
+                "hasUserCode": False
+            }
+        }
+
+    plane_param = {
+        "type": 145,
+        "typeName": "BTMParameterEnum",
+        "message": {
+            "enumName": "PlaneChoice",
+            "value": plane.upper(),
+            "namespace": "efc3267f3a3b8cd872eba3c1d::m5d2006221798a1a8c823fbbe",
+            "parameterId": "planeChoice",
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+    body = {
+        "feature": {
+            "type": 134,
+            "typeName": "BTMFeature",
+            "message": {
+                "featureType": "cylinderFeature",
+                "name": name,
+                "namespace": "efc3267f3a3b8cd872eba3c1d::m5d2006221798a1a8c823fbbe",
+                "suppressed": False,
+                "parameters": [
+                    plane_param,
+                    quantity_param("radius", radius_cm),
+                    quantity_param("depth", depth_cm),
+                    quantity_param("x", x_cm),
+                    quantity_param("y", y_cm),
+                    quantity_param("z", z_cm)
+                ],
+                "subFeatures": [],
+                "returnAfterSubfeatures": False,
+                "suppressionState": {"type": 0},
+                "parameterLibraries": [],
+                "hasUserCode": False
+            }
+        }
+    }
+
+    return onshape_request("POST", path, body=body)
+
+
 
 
 if __name__ == "__main__":
