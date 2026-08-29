@@ -486,7 +486,7 @@ if __name__ == "__main__":
         ],
     )
 
-    mcp_app = mcp.streamable_http_app(transport_security=mcp_security)
+    mcp_app = mcp.streamable_http_app(transport_security=mcp_security, stateless_http=True)
 
     app = Starlette(
         routes=[Mount("/", app=mcp_app)],
