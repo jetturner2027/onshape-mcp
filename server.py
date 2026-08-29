@@ -319,6 +319,49 @@ def create_cylinder(did: str, wid: str, eid: str, radius_cm: float, depth_cm: fl
     return onshape_request("POST", path, body=body)
 
 
+@mcp.tool()
+def boolean_subtract(did: str, wid: str, eid: str, target_feature_id: str, tool_feature_id: str,
+                      name: str = "Boolean Subtract (from API)") -> dict:
+    """Subtract the tool shape from the target shape, using their featureId values returned by earlier create_box/create_cylinder/create_sketch_extrude calls."""
+    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+
+    def string_param(param_id, value):
+        return {
+            "type": 149,
+            "typeName": "BTMParameterString",
+            "message": {
+                "value": value,
+                "parameterId": param_id,
+                "libraryRelationType": "DEFAULT",
+                "parameterName": "",
+                "hasUserCode": False
+            }
+        }
+
+    body = {
+        "feature": {
+            "type": 134,
+            "typeName": "BTMFeature",
+            "message": {
+                "featureType": "booleanSubtractFeature",
+                "name": name,
+                "namespace": "efc3267f3a3b8cd872eba3c1d::m160f2bd7354b94be96bb15c1",
+                "suppressed": False,
+                "parameters": [
+                    string_param("targetFeatureId", target_feature_id),
+                    string_param("toolFeatureId", tool_feature_id)
+                ],
+                "subFeatures": [],
+                "returnAfterSubfeatures": False,
+                "suppressionState": {"type": 0},
+                "parameterLibraries": [],
+                "hasUserCode": False
+            }
+        }
+    }
+
+    return onshape_request("POST", path, body=body)
+
 
 
 if __name__ == "__main__":
