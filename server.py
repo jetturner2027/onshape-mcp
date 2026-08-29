@@ -19,6 +19,32 @@ from starlette.routing import Mount
 
 load_dotenv()
 
+# Caching for read-only operations to minimize token usage
+CACHE_DIR = ".onshape_cache"
+CACHE_TTL = 3600  # 1 hour in seconds
+
+def get_cached(cache_key, fetch_fn, ttl=CACHE_TTL):
+    """Return cached result if fresh, else call fetch_fn() and cache the result."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(CACHE_DIR, f"{cache_key}.json")
+    
+    if os.path.exists(cache_file):
+        mtime = os.path.getmtime(cache_file)
+        if (datetime.now().timestamp() - mtime) < ttl:
+            try:
+                with open(cache_file) as f:
+                    return json.load(f)
+            except Exception:
+                pass  # Fall through and re-fetch if cache read fails
+    
+    result = fetch_fn()
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump(result, f)
+    except Exception:
+        pass  # If cache write fails, just return result anyway
+    return result
+
 ACTIVE_DOCUMENT = {"did": None, "wid": None, "eid": None, "namespace": None}
 ACCESS_KEY = os.getenv("ONSHAPE_ACCESS_KEY")
 SECRET_KEY = os.getenv("ONSHAPE_SECRET_KEY")
@@ -62,10 +88,13 @@ def make_auth_header(method, path, query="", content_type="application/json"):
     }
 
 
-def onshape_request(method, path, query="", body=None):
+def onshape_request(method, path, query="", body=None, extract_fields=None):
     """
     Central request function. In DRY_RUN mode, prints what WOULD be sent
     and returns a fake response instead of hitting the API.
+    
+    extract_fields: optional list of keys to extract from response (for lists and dicts)
+                    reduces token cost by filtering out unnecessary data.
     """
     if DRY_RUN:
         preview = {
@@ -90,7 +119,19 @@ def onshape_request(method, path, query="", body=None):
     if not resp.ok:
         print("ERROR RESPONSE BODY:", resp.text)
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    
+    # Filter response if extract_fields specified
+    if extract_fields:
+        if isinstance(data, list):
+            return [
+                {k: item.get(k) for k in extract_fields if k in item}
+                for item in data
+            ]
+        elif isinstance(data, dict):
+            return {k: data.get(k) for k in extract_fields if k in data}
+    
+    return data
 
 
 def resolve_document_ids(did, wid, eid, namespace=None):
@@ -127,8 +168,58 @@ def find_feature_studio_namespace(elements):
 
 @mcp.tool()
 def list_documents() -> dict:
-    """List OnShape documents owned by the user."""
-    return onshape_request("GET", "/api/documents", query="ownerType=0")
+    """List recent OnShape documents (name and ID only, cached 1 hour)."""
+    def fetch():
+        return onshape_request(
+            "GET", "/api/documents",
+            query="ownerType=0&limit=20",
+            extract_fields=["name", "id", "href"]
+        )
+    return get_cached("list_documents", fetch)
+
+
+@mcp.tool()
+def document_info(did: str, wid: str, eid: str) -> dict:
+    """Get document summary + feature list in one call (batched for efficiency). Returns document ID, name, and feature summary with types and count. Useful when you need an overview of what's in a document."""
+    def fetch():
+        # Get document elements to find part studio name
+        path = f"/api/documents/d/{did}/w/{wid}/elements"
+        elements = onshape_request("GET", path, extract_fields=["id", "name", "elementType"])
+        
+        part_studio_name = None
+        for elem in elements:
+            if elem.get("elementType") == "PARTSTUDIO":
+                part_studio_name = elem.get("name")
+                break
+        
+        # Get features summary
+        features_path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+        features = onshape_request(
+            "GET", features_path,
+            extract_fields=["featureId", "name", "featureType"]
+        )
+        
+        # Summarize features
+        feature_types = {}
+        feature_count = 0
+        if isinstance(features, list):
+            feature_count = len(features)
+            for f in features:
+                ftype = f.get("featureType", "unknown")
+                feature_types[ftype] = feature_types.get(ftype, 0) + 1
+        
+        return {
+            "documentId": did,
+            "partStudioName": part_studio_name,
+            "partStudioId": eid,
+            "featureSummary": {
+                "count": feature_count,
+                "types": feature_types
+            }
+        }
+    
+    cache_key = f"document_info_{did}_{wid}_{eid}"
+    return get_cached(cache_key, fetch)
 
 
 @mcp.tool()
@@ -140,9 +231,30 @@ def run_featurescript(did: str, wid: str, eid: str, script: str) -> dict:
 
 @mcp.tool()
 def get_features(did: str, wid: str, eid: str) -> dict:
-    """Get the current feature list for a part studio."""
-    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
-    return onshape_request("GET", path)
+    """Get feature list summary (cached 1 hour). Returns feature count, types, and names only."""
+    def fetch():
+        path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+        features = onshape_request(
+            "GET", path,
+            extract_fields=["featureId", "name", "featureType"]
+        )
+        # Return compact summary to save tokens
+        if isinstance(features, list):
+            types = {}
+            names = []
+            for f in features:
+                ftype = f.get("featureType", "unknown")
+                types[ftype] = types.get(ftype, 0) + 1
+                names.append(f.get("name"))
+            return {
+                "count": len(features),
+                "types": types,
+                "names": names
+            }
+        return features
+    
+    cache_key = f"features_{did}_{wid}_{eid}"
+    return get_cached(cache_key, fetch)
 
 
 @mcp.tool()
@@ -436,67 +548,75 @@ def copy_document(new_name: str) -> dict:
 @mcp.tool()
 def get_default_part_studio(did: str, wid: str) -> dict:
     """Find the eid (element ID) of the Part Studio in a document/workspace, AND the correct namespace for its custom features (box, cylinder, sketch-extrude, boolean-subtract). REQUIRED after copy_document, before calling any shape-creation tool on a newly created document — each document (including copies) has its own distinct Feature Studio element and namespace; a namespace from a different document will NOT work here. This automatically activates the result (same effect as calling set_active_document), so create_box/create_cylinder/create_sketch_extrude/boolean_subtract can be called right after this with no did/wid/eid/namespace arguments needed."""
-    path = f"/api/documents/d/{did}/w/{wid}/elements"
-    result = onshape_request("GET", path)
+    def fetch():
+        path = f"/api/documents/d/{did}/w/{wid}/elements"
+        result = onshape_request("GET", path)
 
-    if DRY_RUN:
-        return result
+        if DRY_RUN:
+            return result
 
-    eid = None
-    part_studio_name = None
-    for element in result:
-        if element.get("elementType") == "PARTSTUDIO":
-            eid = element.get("id")
-            part_studio_name = element.get("name")
-            break
+        eid = None
+        part_studio_name = None
+        for element in result:
+            if element.get("elementType") == "PARTSTUDIO":
+                eid = element.get("id")
+                part_studio_name = element.get("name")
+                break
 
-    if not eid:
-        return {"error": "No part studio found in this document/workspace."}
+        if not eid:
+            return {"error": "No part studio found in this document/workspace."}
 
-    namespace = find_feature_studio_namespace(result)
-    if not namespace:
+        namespace = find_feature_studio_namespace(result)
+        if not namespace:
+            return {
+                "eid": eid,
+                "name": part_studio_name,
+                "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools (create_box, etc.) will not work here until a Feature Studio with the custom features exists."
+            }
+
+        ACTIVE_DOCUMENT["did"] = did
+        ACTIVE_DOCUMENT["wid"] = wid
+        ACTIVE_DOCUMENT["eid"] = eid
+        ACTIVE_DOCUMENT["namespace"] = namespace
+
         return {
             "eid": eid,
             "name": part_studio_name,
-            "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools (create_box, etc.) will not work here until a Feature Studio with the custom features exists."
+            "namespace": namespace,
+            "active_document": dict(ACTIVE_DOCUMENT)
         }
-
-    ACTIVE_DOCUMENT["did"] = did
-    ACTIVE_DOCUMENT["wid"] = wid
-    ACTIVE_DOCUMENT["eid"] = eid
-    ACTIVE_DOCUMENT["namespace"] = namespace
-
-    return {
-        "eid": eid,
-        "name": part_studio_name,
-        "namespace": namespace,
-        "active_document": dict(ACTIVE_DOCUMENT)
-    }
+    
+    cache_key = f"default_part_studio_{did}_{wid}"
+    return get_cached(cache_key, fetch)
 
 
 @mcp.tool()
 def set_active_document(did: str, wid: str, eid: str) -> dict:
     """Set the current working document/workspace/part studio, so subsequent create_box, create_cylinder, create_sketch_extrude, and boolean_subtract calls don't need did/wid/eid/namespace passed explicitly. Automatically looks up the correct, current namespace for this document's Feature Studio (freshly, so it stays correct even if the Feature Studio has been edited since last time). Use this to switch back to an existing document like the sandbox, or as a manual alternative to get_default_part_studio."""
-    path = f"/api/documents/d/{did}/w/{wid}/elements"
-    result = onshape_request("GET", path)
+    def fetch():
+        path = f"/api/documents/d/{did}/w/{wid}/elements"
+        result = onshape_request("GET", path)
 
-    if DRY_RUN:
-        return result
+        if DRY_RUN:
+            return result
 
-    namespace = find_feature_studio_namespace(result)
+        namespace = find_feature_studio_namespace(result)
 
-    ACTIVE_DOCUMENT["did"] = did
-    ACTIVE_DOCUMENT["wid"] = wid
-    ACTIVE_DOCUMENT["eid"] = eid
-    ACTIVE_DOCUMENT["namespace"] = namespace
+        ACTIVE_DOCUMENT["did"] = did
+        ACTIVE_DOCUMENT["wid"] = wid
+        ACTIVE_DOCUMENT["eid"] = eid
+        ACTIVE_DOCUMENT["namespace"] = namespace
 
-    if not namespace:
-        return {
-            "active_document": dict(ACTIVE_DOCUMENT),
-            "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools will not work here."
-        }
+        if not namespace:
+            return {
+                "active_document": dict(ACTIVE_DOCUMENT),
+                "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools will not work here."
+            }
 
-    return {"active_document": dict(ACTIVE_DOCUMENT)}
+        return {"active_document": dict(ACTIVE_DOCUMENT)}
+    
+    cache_key = f"active_document_{did}_{wid}_{eid}"
+    return get_cached(cache_key, fetch)
 
 
 @mcp.tool()
