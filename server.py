@@ -19,7 +19,7 @@ from starlette.routing import Mount
 
 load_dotenv()
 
-ACTIVE_DOCUMENT = {"did": None, "wid": None, "eid": None}
+ACTIVE_DOCUMENT = {"did": None, "wid": None, "eid": None, "namespace": None}
 ACCESS_KEY = os.getenv("ONSHAPE_ACCESS_KEY")
 SECRET_KEY = os.getenv("ONSHAPE_SECRET_KEY")
 BASE_URL = "https://cad.onshape.com"
@@ -93,15 +93,36 @@ def onshape_request(method, path, query="", body=None):
     return resp.json()
 
 
-def resolve_document_ids(did, wid, eid):
+def resolve_document_ids(did, wid, eid, namespace=None):
     """
-    Falls back to the active document (set via set_active_document) for any
-    of did/wid/eid that weren't explicitly passed in.
+    Falls back to the active document (set via set_active_document, or
+    auto-set by get_default_part_studio) for any of did/wid/eid/namespace
+    that weren't explicitly passed in.
     """
     did = did or ACTIVE_DOCUMENT["did"]
     wid = wid or ACTIVE_DOCUMENT["wid"]
     eid = eid or ACTIVE_DOCUMENT["eid"]
-    return did, wid, eid
+    namespace = namespace or ACTIVE_DOCUMENT["namespace"]
+    return did, wid, eid, namespace
+
+
+def find_feature_studio_namespace(elements):
+    """
+    Given the raw list from /api/documents/d/{did}/w/{wid}/elements, finds
+    the Feature Studio element and builds the namespace string OnShape
+    expects when referencing its custom features: "e{elementId}::m{microversionId}".
+    This must be looked up fresh per document, since a copied document gets
+    its own Feature Studio element ID and microversion — the namespace is
+    NOT the same as the source document's, even though the FeatureScript
+    code inside is identical.
+    """
+    for element in elements:
+        if element.get("elementType") == "FEATURESTUDIO":
+            fs_id = element.get("id")
+            fs_microversion = element.get("microversionId")
+            if fs_id and fs_microversion:
+                return f"e{fs_id}::m{fs_microversion}"
+    return None
 
 
 @mcp.tool()
@@ -126,13 +147,13 @@ def get_features(did: str, wid: str, eid: str) -> dict:
 
 @mcp.tool()
 def create_box(width_cm: float, depth_cm: float, height_cm: float,
-                did: str = None, wid: str = None, eid: str = None,
+                did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                 x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
                 name: str = "Box (from API)") -> dict:
-    """Create a box using the custom boxFeature, at position x, y, z. If did/wid/eid are omitted, uses the currently active document set via set_active_document. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
-    did, wid, eid = resolve_document_ids(did, wid, eid)
-    if not (did and wid and eid):
-        return {"error": "No document specified and no active document set. Call set_active_document or pass did/wid/eid explicitly."}
+    """Create a box using the custom boxFeature, at position x, y, z. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
+    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
+    if not (did and wid and eid and namespace):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
 
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
 
@@ -159,7 +180,7 @@ def create_box(width_cm: float, depth_cm: float, height_cm: float,
             "message": {
                 "featureType": "boxFeature",
                 "name": name,
-                "namespace": "efc3267f3a3b8cd872eba3c1d::m236e471bb36410a40b6af0ac",
+                "namespace": namespace,
                 "suppressed": False,
                 "parameters": [
                     quantity_param("width", width_cm),
@@ -183,13 +204,13 @@ def create_box(width_cm: float, depth_cm: float, height_cm: float,
 
 @mcp.tool()
 def create_sketch_extrude(points: list, depth_cm: float,
-                           did: str = None, wid: str = None, eid: str = None,
+                           did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                            plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
                            name: str = "Sketch Extrude (from API)") -> dict:
-    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]] — the polygon closes automatically. plane is one of FRONT, TOP, RIGHT. If did/wid/eid are omitted, uses the currently active document set via set_active_document. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
-    did, wid, eid = resolve_document_ids(did, wid, eid)
-    if not (did and wid and eid):
-        return {"error": "No document specified and no active document set. Call set_active_document or pass did/wid/eid explicitly."}
+    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]] — the polygon closes automatically. plane is one of FRONT, TOP, RIGHT. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
+    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
+    if not (did and wid and eid and namespace):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
 
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
 
@@ -240,7 +261,7 @@ def create_sketch_extrude(points: list, depth_cm: float,
         "message": {
             "enumName": "PlaneChoice",
             "value": plane.upper(),
-            "namespace": "efc3267f3a3b8cd872eba3c1d::m39a9a67356b63278366e62e5",
+            "namespace": namespace,
             "parameterId": "planeChoice",
             "libraryRelationType": "DEFAULT",
             "parameterName": "",
@@ -255,7 +276,7 @@ def create_sketch_extrude(points: list, depth_cm: float,
             "message": {
                 "featureType": "sketchExtrudeFeature",
                 "name": name,
-                "namespace": "efc3267f3a3b8cd872eba3c1d::m39a9a67356b63278366e62e5",
+                "namespace": namespace,
                 "suppressed": False,
                 "parameters": [
                     plane_param,
@@ -279,13 +300,13 @@ def create_sketch_extrude(points: list, depth_cm: float,
 
 @mcp.tool()
 def create_cylinder(radius_cm: float, depth_cm: float,
-                     did: str = None, wid: str = None, eid: str = None,
+                     did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                      plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
                      name: str = "Cylinder (from API)") -> dict:
-    """Create a cylinder. plane is one of FRONT, TOP, RIGHT. If did/wid/eid are omitted, uses the currently active document set via set_active_document. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
-    did, wid, eid = resolve_document_ids(did, wid, eid)
-    if not (did and wid and eid):
-        return {"error": "No document specified and no active document set. Call set_active_document or pass did/wid/eid explicitly."}
+    """Create a cylinder. plane is one of FRONT, TOP, RIGHT. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
+    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
+    if not (did and wid and eid and namespace):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
 
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
 
@@ -311,7 +332,7 @@ def create_cylinder(radius_cm: float, depth_cm: float,
         "message": {
             "enumName": "PlaneChoice",
             "value": plane.upper(),
-            "namespace": "efc3267f3a3b8cd872eba3c1d::m5d2006221798a1a8c823fbbe",
+            "namespace": namespace,
             "parameterId": "planeChoice",
             "libraryRelationType": "DEFAULT",
             "parameterName": "",
@@ -326,7 +347,7 @@ def create_cylinder(radius_cm: float, depth_cm: float,
             "message": {
                 "featureType": "cylinderFeature",
                 "name": name,
-                "namespace": "efc3267f3a3b8cd872eba3c1d::m5d2006221798a1a8c823fbbe",
+                "namespace": namespace,
                 "suppressed": False,
                 "parameters": [
                     plane_param,
@@ -350,12 +371,12 @@ def create_cylinder(radius_cm: float, depth_cm: float,
 
 @mcp.tool()
 def boolean_subtract(target_feature_id: str, tool_feature_id: str,
-                      did: str = None, wid: str = None, eid: str = None,
+                      did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                       name: str = "Boolean Subtract (from API)") -> dict:
-    """Subtract the tool shape from the target shape, removing tool_feature_id's geometry from target_feature_id's geometry (e.g. cutting a hole). Both feature IDs must come from the featureId returned by an earlier create_box, create_cylinder, or create_sketch_extrude call in the SAME document/workspace. If did/wid/eid are omitted, uses the currently active document set via set_active_document. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio."""
-    did, wid, eid = resolve_document_ids(did, wid, eid)
-    if not (did and wid and eid):
-        return {"error": "No document specified and no active document set. Call set_active_document or pass did/wid/eid explicitly."}
+    """Subtract the tool shape from the target shape, removing tool_feature_id's geometry from target_feature_id's geometry (e.g. cutting a hole). Both feature IDs must come from the featureId returned by an earlier create_box, create_cylinder, or create_sketch_extrude call in the SAME document/workspace. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio."""
+    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
+    if not (did and wid and eid and namespace):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
 
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
 
@@ -379,7 +400,7 @@ def boolean_subtract(target_feature_id: str, tool_feature_id: str,
             "message": {
                 "featureType": "booleanSubtractFeature",
                 "name": name,
-                "namespace": "efc3267f3a3b8cd872eba3c1d::m160f2bd7354b94be96bb15c1",
+                "namespace": namespace,
                 "suppressed": False,
                 "parameters": [
                     string_param("targetFeatureId", target_feature_id),
@@ -399,7 +420,7 @@ def boolean_subtract(target_feature_id: str, tool_feature_id: str,
 
 @mcp.tool()
 def copy_document(new_name: str) -> dict:
-    """Create a new OnShape document by copying the template document, which already has box, cylinder, sketch-extrude, and boolean-subtract custom features defined. Use this when the user wants to start a new project or design, rather than working in an existing document. Returns newDocumentId and newWorkspaceId. IMPORTANT: after calling this, you must call get_default_part_studio with those two values to get the eid, then call set_active_document so subsequent shape tools work without needing did/wid/eid passed every time."""
+    """Create a new OnShape document by copying the template document, which already has box, cylinder, sketch-extrude, and boolean-subtract custom features defined. Use this when the user wants to start a new project or design, rather than working in an existing document. Returns newDocumentId and newWorkspaceId. IMPORTANT: after calling this, you must call get_default_part_studio with those two values — it automatically finds the eid AND the correct namespace for this new document's own copy of the custom features, and activates them so subsequent shape tools work without needing did/wid/eid/namespace passed every time."""
     template_did = "e7a7295f056b7f47b58fb416"
     template_wid = "db250fad1eec3791e9940156"
 
@@ -414,34 +435,75 @@ def copy_document(new_name: str) -> dict:
 
 @mcp.tool()
 def get_default_part_studio(did: str, wid: str) -> dict:
-    """Find the eid (element ID) of the Part Studio in a document/workspace. REQUIRED after copy_document, before calling any shape-creation tool (create_box, create_cylinder, create_sketch_extrude, boolean_subtract) on a newly created document — those tools need did, wid, AND eid, and eid is not returned by copy_document. After getting the eid, call set_active_document so subsequent shape tools don't need did/wid/eid passed every time."""
+    """Find the eid (element ID) of the Part Studio in a document/workspace, AND the correct namespace for its custom features (box, cylinder, sketch-extrude, boolean-subtract). REQUIRED after copy_document, before calling any shape-creation tool on a newly created document — each document (including copies) has its own distinct Feature Studio element and namespace; a namespace from a different document will NOT work here. This automatically activates the result (same effect as calling set_active_document), so create_box/create_cylinder/create_sketch_extrude/boolean_subtract can be called right after this with no did/wid/eid/namespace arguments needed."""
     path = f"/api/documents/d/{did}/w/{wid}/elements"
     result = onshape_request("GET", path)
 
     if DRY_RUN:
         return result
 
+    eid = None
+    part_studio_name = None
     for element in result:
         if element.get("elementType") == "PARTSTUDIO":
-            return {"eid": element.get("id"), "name": element.get("name")}
+            eid = element.get("id")
+            part_studio_name = element.get("name")
+            break
 
-    return {"error": "No part studio found in this document/workspace."}
+    if not eid:
+        return {"error": "No part studio found in this document/workspace."}
+
+    namespace = find_feature_studio_namespace(result)
+    if not namespace:
+        return {
+            "eid": eid,
+            "name": part_studio_name,
+            "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools (create_box, etc.) will not work here until a Feature Studio with the custom features exists."
+        }
+
+    ACTIVE_DOCUMENT["did"] = did
+    ACTIVE_DOCUMENT["wid"] = wid
+    ACTIVE_DOCUMENT["eid"] = eid
+    ACTIVE_DOCUMENT["namespace"] = namespace
+
+    return {
+        "eid": eid,
+        "name": part_studio_name,
+        "namespace": namespace,
+        "active_document": dict(ACTIVE_DOCUMENT)
+    }
 
 
 @mcp.tool()
 def set_active_document(did: str, wid: str, eid: str) -> dict:
-    """Set the current working document/workspace/part studio, so subsequent create_box, create_cylinder, create_sketch_extrude, and boolean_subtract calls don't need did/wid/eid passed explicitly. Call this once after copy_document + get_default_part_studio, or to switch back to an existing document like the sandbox."""
+    """Set the current working document/workspace/part studio, so subsequent create_box, create_cylinder, create_sketch_extrude, and boolean_subtract calls don't need did/wid/eid/namespace passed explicitly. Automatically looks up the correct, current namespace for this document's Feature Studio (freshly, so it stays correct even if the Feature Studio has been edited since last time). Use this to switch back to an existing document like the sandbox, or as a manual alternative to get_default_part_studio."""
+    path = f"/api/documents/d/{did}/w/{wid}/elements"
+    result = onshape_request("GET", path)
+
+    if DRY_RUN:
+        return result
+
+    namespace = find_feature_studio_namespace(result)
+
     ACTIVE_DOCUMENT["did"] = did
     ACTIVE_DOCUMENT["wid"] = wid
     ACTIVE_DOCUMENT["eid"] = eid
+    ACTIVE_DOCUMENT["namespace"] = namespace
+
+    if not namespace:
+        return {
+            "active_document": dict(ACTIVE_DOCUMENT),
+            "warning": "No Feature Studio found in this document, so no namespace could be resolved. Shape-creation tools will not work here."
+        }
+
     return {"active_document": dict(ACTIVE_DOCUMENT)}
 
 
 @mcp.tool()
 def get_active_document() -> dict:
-    """Return the currently active did/wid/eid, if one has been set with set_active_document."""
+    """Return the currently active did/wid/eid/namespace, if one has been set with set_active_document or get_default_part_studio."""
     if not ACTIVE_DOCUMENT["did"]:
-        return {"error": "No active document set. Call set_active_document first."}
+        return {"error": "No active document set. Call set_active_document or get_default_part_studio first."}
     return dict(ACTIVE_DOCUMENT)
 
 
