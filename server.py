@@ -12,6 +12,7 @@ from mcp.server.mcpserver import MCPServer
 
 load_dotenv()
 
+ACTIVE_DOCUMENT = {"did": None, "wid": None, "eid": None}
 ACCESS_KEY = os.getenv("ONSHAPE_ACCESS_KEY")
 SECRET_KEY = os.getenv("ONSHAPE_SECRET_KEY")
 BASE_URL = "https://cad.onshape.com"
@@ -91,14 +92,8 @@ def list_documents() -> dict:
 
 
 @mcp.tool()
-def create_document(name: str) -> dict:
-    """Create a new OnShape document with the given name."""
-    return onshape_request("POST", "/api/documents", body={"name": name})
-
-
-@mcp.tool()
 def run_featurescript(did: str, wid: str, eid: str, script: str) -> dict:
-    """Run a FeatureScript snippet against a part studio to create or modify geometry."""
+    """Evaluate a FeatureScript expression and return its result. This is READ-ONLY — it does NOT create or persist any geometry in the document. Use create_box, create_cylinder, create_sketch_extrude, or boolean_subtract to actually add shapes. Useful for querying plane IDs, evaluating expressions, or inspecting geometry state."""
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/featurescript"
     return onshape_request("POST", path, body={"script": script})
 
@@ -114,8 +109,7 @@ def get_features(did: str, wid: str, eid: str) -> dict:
 def create_box(did: str, wid: str, eid: str, width_cm: float, depth_cm: float, height_cm: float,
                 x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
                 name: str = "Box (from API)") -> dict:
-    """Create a box in the given part studio using the custom boxFeature, at position x, y, z."""
-    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+    """Create a box in the given part studio using the custom boxFeature, at position x, y, z. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio."""
 
     def quantity_param(param_id, cm_value):
         return {
@@ -166,8 +160,7 @@ def create_box(did: str, wid: str, eid: str, width_cm: float, depth_cm: float, h
 def create_sketch_extrude(did: str, wid: str, eid: str, points: list, depth_cm: float,
                            plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
                            name: str = "Sketch Extrude (from API)") -> dict:
-    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]]. plane is one of FRONT, TOP, RIGHT."""
-    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]] — the polygon closes automatically. plane is one of FRONT, TOP, RIGHT. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
 
     def quantity_param(param_id, cm_value):
         return {
@@ -257,9 +250,7 @@ def create_sketch_extrude(did: str, wid: str, eid: str, points: list, depth_cm: 
 def create_cylinder(did: str, wid: str, eid: str, radius_cm: float, depth_cm: float,
                      plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
                      name: str = "Cylinder (from API)") -> dict:
-    """Create a cylinder in the given part studio. plane is one of FRONT, TOP, RIGHT."""
-    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
-
+    """Create a cylinder in the given part studio. plane is one of FRONT, TOP, RIGHT. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
     def quantity_param(param_id, cm_value):
         return {
             "type": 147,
@@ -322,9 +313,7 @@ def create_cylinder(did: str, wid: str, eid: str, radius_cm: float, depth_cm: fl
 @mcp.tool()
 def boolean_subtract(did: str, wid: str, eid: str, target_feature_id: str, tool_feature_id: str,
                       name: str = "Boolean Subtract (from API)") -> dict:
-    """Subtract the tool shape from the target shape, using their featureId values returned by earlier create_box/create_cylinder/create_sketch_extrude calls."""
-    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
-
+    """Subtract the tool shape from the target shape, removing tool_feature_id's geometry from target_feature_id's geometry (e.g. cutting a hole). Both feature IDs must come from the featureId returned by an earlier create_box, create_cylinder, or create_sketch_extrude call in the SAME document/workspace. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio."""
     def string_param(param_id, value):
         return {
             "type": 149,
@@ -361,6 +350,59 @@ def boolean_subtract(did: str, wid: str, eid: str, target_feature_id: str, tool_
     }
 
     return onshape_request("POST", path, body=body)
+
+
+
+@mcp.tool()
+def copy_document(new_name: str) -> dict:
+    """Create a new OnShape document by copying the template document, which already has box, cylinder, sketch-extrude, and boolean-subtract custom features defined. Use this when the user wants to start a new project or design, rather than working in an existing document. Returns newDocumentId and newWorkspaceId. IMPORTANT: after calling this, you must call get_default_part_studio with those two values to get the eid before you can call create_box, create_cylinder, create_sketch_extrude, or boolean_subtract in the new document."""
+    template_did = "e7a7295f056b7f47b58fb416"
+    template_wid = "db250fad1eec3791e9940156"
+
+    path = f"/api/documents/{template_did}/workspaces/{template_wid}/copy"
+    body = {
+        "newName": new_name,
+        "isPublic": False
+    }
+
+    return onshape_request("POST", path, body=body)
+
+
+
+@mcp.tool()
+def get_default_part_studio(did: str, wid: str) -> dict:
+    """Find the eid (element ID) of the Part Studio in a document/workspace. REQUIRED after copy_document, before calling any shape-creation tool (create_box, create_cylinder, create_sketch_extrude, boolean_subtract) on a newly created document — those tools need did, wid, AND eid, and eid is not returned by copy_document."""
+    path = f"/api/documents/d/{did}/w/{wid}/elements"
+    result = onshape_request("GET", path)
+
+    if DRY_RUN:
+        return result
+
+    for element in result:
+        if element.get("elementType") == "PARTSTUDIO":
+            return {"eid": element.get("id"), "name": element.get("name")}
+
+    return {"error": "No part studio found in this document/workspace."}
+
+
+
+@mcp.tool()
+def set_active_document(did: str, wid: str, eid: str) -> dict:
+    """Set the current working document/workspace/part studio, so subsequent create_box, create_cylinder, create_sketch_extrude, and boolean_subtract calls don't need did/wid/eid passed explicitly. Call this once after copy_document + get_default_part_studio, or to switch back to an existing document like the sandbox."""
+    ACTIVE_DOCUMENT["did"] = did
+    ACTIVE_DOCUMENT["wid"] = wid
+    ACTIVE_DOCUMENT["eid"] = eid
+    return {"active_document": dict(ACTIVE_DOCUMENT)}
+
+
+@mcp.tool()
+def get_active_document() -> dict:
+    """Return the currently active did/wid/eid, if one has been set with set_active_document."""
+    if not ACTIVE_DOCUMENT["did"]:
+        return {"error": "No active document set. Call set_active_document first."}
+    return dict(ACTIVE_DOCUMENT)
+
+
 
 
 
