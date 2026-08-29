@@ -162,6 +162,99 @@ def create_box(did: str, wid: str, eid: str, width_cm: float, depth_cm: float, h
     return onshape_request("POST", path, body=body)
 
 
+@mcp.tool()
+def create_sketch_extrude(did: str, wid: str, eid: str, points: list, depth_cm: float,
+                           plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
+                           name: str = "Sketch Extrude (from API)") -> dict:
+    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]]. plane is one of FRONT, TOP, RIGHT."""
+    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+
+    def quantity_param(param_id, cm_value):
+        return {
+            "type": 147,
+            "typeName": "BTMParameterQuantity",
+            "message": {
+                "units": "",
+                "value": 0.0,
+                "expression": f"{cm_value} cm",
+                "isInteger": False,
+                "parameterId": param_id,
+                "libraryRelationType": "DEFAULT",
+                "parameterName": "",
+                "hasUserCode": False
+            }
+        }
+
+    def point_item(px_cm, py_cm):
+        return {
+            "type": 1843,
+            "typeName": "BTMArrayParameterItem",
+            "message": {
+                "parameters": [
+                    quantity_param("px", px_cm),
+                    quantity_param("py", py_cm)
+                ],
+                "hasUserCode": False
+            }
+        }
+
+    points_array = {
+        "type": 2025,
+        "typeName": "BTMParameterArray",
+        "message": {
+            "items": [point_item(p[0], p[1]) for p in points],
+            "parameterId": "points",
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+    plane_param = {
+        "type": 145,
+        "typeName": "BTMParameterEnum",
+        "message": {
+            "enumName": "PlaneChoice",
+            "value": plane.upper(),
+            "namespace": "efc3267f3a3b8cd872eba3c1d::m39a9a67356b63278366e62e5",
+            "parameterId": "planeChoice",
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+    body = {
+        "feature": {
+            "type": 134,
+            "typeName": "BTMFeature",
+            "message": {
+                "featureType": "sketchExtrudeFeature",
+                "name": name,
+                "namespace": "efc3267f3a3b8cd872eba3c1d::m39a9a67356b63278366e62e5",
+                "suppressed": False,
+                "parameters": [
+                    plane_param,
+                    points_array,
+                    quantity_param("depth", depth_cm),
+                    quantity_param("x", x_cm),
+                    quantity_param("y", y_cm),
+                    quantity_param("z", z_cm)
+                ],
+                "subFeatures": [],
+                "returnAfterSubfeatures": False,
+                "suppressionState": {"type": 0},
+                "parameterLibraries": [],
+                "hasUserCode": False
+            }
+        }
+    }
+
+    return onshape_request("POST", path, body=body)
+
+
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
