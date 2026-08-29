@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import requests
 from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -465,7 +466,19 @@ class ConnectorAuthMiddleware(BaseHTTPMiddleware):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
 
-    mcp_app = mcp.streamable_http_app()
+    mcp_security = TransportSecuritySettings(
+        allowed_hosts=[
+            "onshape-mcp-xe4z.onrender.com",
+            "onshape-mcp-xe4z.onrender.com:*",
+            "127.0.0.1:*",
+            "localhost:*",
+        ],
+        allowed_origins=[
+            "https://onshape-mcp-xe4z.onrender.com",
+        ],
+    )
+
+    mcp_app = mcp.streamable_http_app(transport_security=mcp_security)
 
     app = Starlette(
         routes=[Mount("/", app=mcp_app)],
