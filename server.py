@@ -84,6 +84,8 @@ def onshape_request(method, path, query="", body=None):
         resp = requests.get(url, headers=headers)
     elif method.upper() == "POST":
         resp = requests.post(url, headers=headers, json=body)
+    elif method.upper() == "DELETE":
+        resp = requests.delete(url, headers=headers)
     else:
         raise ValueError(f"Unsupported method: {method}")
 
@@ -184,6 +186,18 @@ def run_featurescript(did: str, wid: str, eid: str, script: str) -> dict:
     """Evaluate a FeatureScript expression and return its result. This is READ-ONLY — it does NOT create or persist any geometry in the document. Use create_cylinder, create_sketch_extrude, or boolean_subtract to actually add shapes. Useful for querying plane IDs, evaluating expressions, or inspecting geometry state."""
     path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/featurescript"
     return onshape_request("POST", path, body={"script": script})
+
+
+@mcp.tool()
+def delete_feature(feature_id: str,
+                    did: str = None, wid: str = None, eid: str = None) -> dict:
+    """Permanently delete a feature (any shape or operation created by this connector, or any other feature) from a part studio's feature list, identified by its featureId. Use this to remove a mistake or an unwanted shape rather than leaving it in the model. This cannot be undone through this connector — there is no restore. If did/wid/eid are omitted, uses the currently active document."""
+    did, wid, eid, _ = resolve_document_ids(did, wid, eid, None)
+    if not (did and wid and eid):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid explicitly."}
+
+    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features/featureid/{feature_id}"
+    return onshape_request("DELETE", path)
 
 
 @mcp.tool()
