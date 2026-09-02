@@ -156,6 +156,23 @@ def boolean_param(param_id, value):
     }
 
 
+def integer_param(param_id, int_value):
+    return {
+        "type": 147,
+        "typeName": "BTMParameterQuantity",
+        "message": {
+            "units": "",
+            "value": 0.0,
+            "expression": str(int(int_value)),
+            "isInteger": True,
+            "parameterId": param_id,
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+
 @mcp.tool()
 def list_documents() -> dict:
     """List OnShape documents owned by the user."""
@@ -400,6 +417,185 @@ def create_revolve(points: list, axis_x_cm: float, angle_deg: float,
                     quantity_param("axisX", axis_x_cm),
                     degree_param("angle", angle_deg),
                     boolean_param("merge", merge)
+                ],
+                "subFeatures": [],
+                "returnAfterSubfeatures": False,
+                "suppressionState": {"type": 0},
+                "parameterLibraries": [],
+                "hasUserCode": False
+            }
+        }
+    }
+
+    return onshape_request("POST", path, body=body)
+
+
+@mcp.tool()
+def create_circular_pattern(source_feature_id: str, count: int, angle_step_deg: float,
+                             did: str = None, wid: str = None, eid: str = None, namespace: str = None,
+                             axis_x_cm: float = 0, axis_y_cm: float = 0) -> dict:
+    """Create N-1 additional rotated copies of an existing shape around a vertical axis (total instances = count, including the original). source_feature_id is the featureId of an already-created shape (from create_cylinder, create_sketch_extrude, create_revolve, etc.) in the SAME document/workspace. count is the total number of instances (e.g. count=4 for one original plus 3 copies). angle_step_deg is the angle between each instance in degrees. axis_x_cm/axis_y_cm position the rotation axis (default is the origin, 0,0). Good for bolt-hole circles, repeated bosses, or any radially-repeated feature — much cheaper than calling the shape tool multiple times by hand. If did/wid/eid/namespace are omitted, uses the currently active document."""
+    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
+    if not (did and wid and eid and namespace):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
+
+    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+
+    body = {
+        "feature": {
+            "type": 134,
+            "typeName": "BTMFeature",
+            "message": {
+                "featureType": "circularPatternFeature",
+                "name": "Circular Pattern (from API)",
+                "namespace": namespace,
+                "suppressed": False,
+                "parameters": [
+                    {
+                        "type": 149,
+                        "typeName": "BTMParameterString",
+                        "message": {
+                            "value": source_feature_id,
+                            "parameterId": "sourceFeatureId",
+                            "libraryRelationType": "DEFAULT",
+                            "parameterName": "",
+                            "hasUserCode": False
+                        }
+                    },
+                    integer_param("count", count),
+                    degree_param("angleStep", angle_step_deg),
+                    quantity_param("axisX", axis_x_cm),
+                    quantity_param("axisY", axis_y_cm)
+                ],
+                "subFeatures": [],
+                "returnAfterSubfeatures": False,
+                "suppressionState": {"type": 0},
+                "parameterLibraries": [],
+                "hasUserCode": False
+            }
+        }
+    }
+
+    return onshape_request("POST", path, body=body)
+
+
+@mcp.tool()
+def fillet_all_edges(target_feature_id: str, radius_cm: float,
+                      did: str = None, wid: str = None, eid: str = None, namespace: str = None) -> dict:
+    """Round every edge of an existing shape's body by a uniform radius. target_feature_id is the featureId of an already-created shape in the SAME document/workspace. This rounds ALL edges of that body uniformly — there is no way to selectively fillet only some edges (that would require fragile edge-by-edge selection). If only some edges of a part should be rounded, build the rounded and sharp portions as separate bodies and combine them afterward. If did/wid/eid/namespace are omitted, uses the currently active document."""
+    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
+    if not (did and wid and eid and namespace):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
+
+    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+
+    def string_param(param_id, value):
+        return {
+            "type": 149,
+            "typeName": "BTMParameterString",
+            "message": {
+                "value": value,
+                "parameterId": param_id,
+                "libraryRelationType": "DEFAULT",
+                "parameterName": "",
+                "hasUserCode": False
+            }
+        }
+
+    body = {
+        "feature": {
+            "type": 134,
+            "typeName": "BTMFeature",
+            "message": {
+                "featureType": "filletAllEdgesFeature",
+                "name": "Fillet All Edges (from API)",
+                "namespace": namespace,
+                "suppressed": False,
+                "parameters": [
+                    string_param("targetFeatureId", target_feature_id),
+                    quantity_param("radius", radius_cm)
+                ],
+                "subFeatures": [],
+                "returnAfterSubfeatures": False,
+                "suppressionState": {"type": 0},
+                "parameterLibraries": [],
+                "hasUserCode": False
+            }
+        }
+    }
+
+    return onshape_request("POST", path, body=body)
+
+
+@mcp.tool()
+def create_tilted_sketch_extrude(points: list, depth_cm: float, tilt_deg: float,
+                                  did: str = None, wid: str = None, eid: str = None, namespace: str = None,
+                                  plane: str = "FRONT", merge: bool = True,
+                                  draft_deg: float = 0, draft_flip: bool = False,
+                                  name: str = "Tilted Sketch Extrude (from API)") -> dict:
+    """Like create_sketch_extrude, but the sketch plane is tilted by tilt_deg (degrees) around its own local X-axis before the profile is sketched and extruded — useful for angled bosses, tilted pockets, or any feature that isn't perpendicular to the FRONT/TOP/RIGHT planes. points is a list of [x_cm, y_cm] pairs in the TILTED plane's own coordinates (not world coordinates) — the polygon closes automatically. plane is the base plane (FRONT, TOP, or RIGHT) before tilting. draft_deg/draft_flip work the same as in create_sketch_extrude — draft_deg is always a positive magnitude, use draft_flip to reverse taper direction. Same merge rules as the other shape tools — the FIRST shape in an empty part studio must use merge=False. If did/wid/eid/namespace are omitted, uses the currently active document. Returns the created feature's featureId."""
+    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
+    if not (did and wid and eid and namespace):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
+
+    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+
+    def point_item(px_cm, py_cm):
+        return {
+            "type": 1843,
+            "typeName": "BTMArrayParameterItem",
+            "message": {
+                "parameters": [
+                    quantity_param("px", px_cm),
+                    quantity_param("py", py_cm)
+                ],
+                "hasUserCode": False
+            }
+        }
+
+    points_array = {
+        "type": 2025,
+        "typeName": "BTMParameterArray",
+        "message": {
+            "items": [point_item(p[0], p[1]) for p in points],
+            "parameterId": "points",
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+    plane_param = {
+        "type": 145,
+        "typeName": "BTMParameterEnum",
+        "message": {
+            "enumName": "PlaneChoice",
+            "value": plane.upper(),
+            "namespace": namespace,
+            "parameterId": "planeChoice",
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+    body = {
+        "feature": {
+            "type": 134,
+            "typeName": "BTMFeature",
+            "message": {
+                "featureType": "tiltedExtrudeFeature",
+                "name": name,
+                "namespace": namespace,
+                "suppressed": False,
+                "parameters": [
+                    plane_param,
+                    degree_param("tiltAngle", tilt_deg),
+                    points_array,
+                    quantity_param("depth", depth_cm),
+                    boolean_param("merge", merge),
+                    degree_param("draftAngle", draft_deg),
+                    boolean_param("draftPullDirection", draft_flip)
                 ],
                 "subFeatures": [],
                 "returnAfterSubfeatures": False,
