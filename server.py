@@ -176,13 +176,30 @@ def get_features(did: str, wid: str, eid: str) -> dict:
     return onshape_request("GET", path)
 
 
+def degree_param(param_id, deg_value):
+    return {
+        "type": 147,
+        "typeName": "BTMParameterQuantity",
+        "message": {
+            "units": "",
+            "value": 0.0,
+            "expression": f"{deg_value} deg",
+            "isInteger": False,
+            "parameterId": param_id,
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+
 @mcp.tool()
 def create_sketch_extrude(points: list, depth_cm: float,
                            did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                            plane: str = "FRONT", x_cm: float = 0, y_cm: float = 0, z_cm: float = 0,
-                           merge: bool = True,
+                           merge: bool = True, draft_deg: float = 0, draft_flip: bool = False,
                            name: str = "Sketch Extrude (from API)") -> dict:
-    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]] — the polygon closes automatically. plane is one of FRONT, TOP, RIGHT. merge (default True) merges this shape into any existing touching/overlapping solid so the part studio ends up with one combined part rather than a separate part per shape — set merge=False if you specifically want a standalone body. If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
+    """Create an extruded shape from an arbitrary 2D polygon. points is a list of [x_cm, y_cm] pairs, e.g. [[0,0],[3,0],[1.5,3]] — the polygon closes automatically. plane is one of FRONT, TOP, RIGHT. merge (default True) merges this shape into any existing touching/overlapping solid so the part studio ends up with one combined part rather than a separate part per shape — the FIRST shape created in an empty part studio MUST use merge=False, since there is nothing yet to merge into. draft_deg (default 0) tapers the extrude's walls by this many degrees — always a positive magnitude; use draft_flip=True to reverse which direction it tapers (wider vs narrower toward the extrude end). If did/wid/eid/namespace are omitted, uses the currently active document (set automatically by get_default_part_studio, or manually via set_active_document). did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
     did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
     if not (did and wid and eid and namespace):
         return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
@@ -244,7 +261,9 @@ def create_sketch_extrude(points: list, depth_cm: float,
                     quantity_param("x", x_cm),
                     quantity_param("y", y_cm),
                     quantity_param("z", z_cm),
-                    boolean_param("merge", merge)
+                    boolean_param("merge", merge),
+                    degree_param("draftAngle", draft_deg),
+                    boolean_param("draftPullDirection", draft_flip)
                 ],
                 "subFeatures": [],
                 "returnAfterSubfeatures": False,
