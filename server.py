@@ -335,6 +335,85 @@ def create_cylinder(radius_cm: float, depth_cm: float,
 
 
 @mcp.tool()
+def create_revolve(points: list, axis_x_cm: float, angle_deg: float,
+                    did: str = None, wid: str = None, eid: str = None, namespace: str = None,
+                    plane: str = "FRONT", merge: bool = True,
+                    name: str = "Revolve (from API)") -> dict:
+    """Create a solid of revolution by sketching a 2D profile on the given plane and revolving it around a vertical axis within that same plane. points is a list of [x_cm, y_cm] pairs defining the profile — the polygon closes automatically. axis_x_cm is the x-position (within the sketch plane's own coordinates) of the vertical revolve axis; for a typical revolve, keep all profile points on one side of axis_x_cm to avoid self-intersection. angle_deg is the revolve sweep angle (0-360, positive magnitude — use 360 for a full revolve). plane is one of FRONT, TOP, RIGHT. merge (default True) merges this shape into any existing touching/overlapping solid — the FIRST shape created in an empty part studio MUST use merge=False. Good for lures, handles, knobs, floats, or any part with a rotational axis. If did/wid/eid/namespace are omitted, uses the currently active document. did/wid/eid must reference an existing part studio — for a new project, get these from copy_document followed by get_default_part_studio. Returns the created feature's featureId, which can be used later with boolean_subtract."""
+    did, wid, eid, namespace = resolve_document_ids(did, wid, eid, namespace)
+    if not (did and wid and eid and namespace):
+        return {"error": "No document specified and no active document set. Call get_default_part_studio (after copy_document) or set_active_document, or pass did/wid/eid/namespace explicitly."}
+
+    path = f"/api/partstudios/d/{did}/w/{wid}/e/{eid}/features"
+
+    def point_item(px_cm, py_cm):
+        return {
+            "type": 1843,
+            "typeName": "BTMArrayParameterItem",
+            "message": {
+                "parameters": [
+                    quantity_param("px", px_cm),
+                    quantity_param("py", py_cm)
+                ],
+                "hasUserCode": False
+            }
+        }
+
+    points_array = {
+        "type": 2025,
+        "typeName": "BTMParameterArray",
+        "message": {
+            "items": [point_item(p[0], p[1]) for p in points],
+            "parameterId": "points",
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+    plane_param = {
+        "type": 145,
+        "typeName": "BTMParameterEnum",
+        "message": {
+            "enumName": "PlaneChoice",
+            "value": plane.upper(),
+            "namespace": namespace,
+            "parameterId": "planeChoice",
+            "libraryRelationType": "DEFAULT",
+            "parameterName": "",
+            "hasUserCode": False
+        }
+    }
+
+    body = {
+        "feature": {
+            "type": 134,
+            "typeName": "BTMFeature",
+            "message": {
+                "featureType": "revolveFeature",
+                "name": name,
+                "namespace": namespace,
+                "suppressed": False,
+                "parameters": [
+                    plane_param,
+                    points_array,
+                    quantity_param("axisX", axis_x_cm),
+                    degree_param("angle", angle_deg),
+                    boolean_param("merge", merge)
+                ],
+                "subFeatures": [],
+                "returnAfterSubfeatures": False,
+                "suppressionState": {"type": 0},
+                "parameterLibraries": [],
+                "hasUserCode": False
+            }
+        }
+    }
+
+    return onshape_request("POST", path, body=body)
+
+
+@mcp.tool()
 def boolean_subtract(target_feature_id: str, tool_feature_id: str,
                       did: str = None, wid: str = None, eid: str = None, namespace: str = None,
                       name: str = "Boolean Subtract (from API)") -> dict:
